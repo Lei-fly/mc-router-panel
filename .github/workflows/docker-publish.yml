@@ -10,9 +10,13 @@
 # 构建策略：原生 runner 矩阵 + manifest 合并
 #   - amd64 跑 ubuntu-latest（x86_64 原生）
 #   - arm64 跑 ubuntu-24.04-arm（arm64 原生，GitHub 免费 GA）
-#   各架构在原生 runner 上构建，推到「带 commit sha 的单架构镜像」(唯一、不堆积)，
+#   各架构在原生 runner 上构建，推到「稳定的单架构标签」arch-amd64/arch-arm64（每次覆盖不堆积），
 #   再由 merge job 用 imagetools 组装出对外的多架构标签(:latest/:版本号/:sha)。
-#   不走 QEMU（模拟慢且并行构建易 OOM），全程原生、稳定、快速；无重复覆盖的中间标签。
+#   不走 QEMU（模拟慢且并行构建易 OOM），全程原生、稳定、快速；provenance 关闭避免元数据刷屏。
+#
+# ⚠️ GHCR 清理规则（重要，违反会导致 :latest 子 manifest 悬空损坏）：
+#   - 只可删除旧 commit 对应的多架构主版本（标签如 :sha-<旧7位sha> / :v旧版本号）
+#   - 严禁删除 arch-amd64 / arch-arm64 —— 它们是 :latest 等多架构标签的子镜像依赖
 # 鉴权：使用内置 GITHUB_TOKEN，无需额外 PAT。
 # ============================================================
 name: Build and Publish Image
@@ -45,9 +49,6 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             suffix: arm64
-    # 把本次 commit 的短 sha 暴露为输出，merge 据此引用单架构镜像
-    outputs:
-      sha: ${{ steps.sha.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,11 +57,6 @@ jobs:
       - name: 小写化镜像名
         id: image
         run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-
-      # 取 7 位短 sha，作为单架构镜像的唯一标签（每次提交唯一，不会互相覆盖堆积）
-      - name: 取 commit 短 sha
-        id: sha
-        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -72,14 +68,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 单架构镜像只打 sha-<sha>-<arch> 标签：唯一且可追溯，merge 据此组装多架构标签
+      # 单架构镜像打稳定标签 arch-<arch>（每次覆盖，不堆积）：
+      #   - 它是 :latest 多架构 manifest 的子镜像依赖，必须始终保留
+      #   - 清理时只能删旧 commit 的多架构主版本(:sha-<旧sha>)，绝不删 arch-*
+      #   - 否则 :latest 的子 manifest 会悬空（参考 GHCR 损坏事故）
       - name: 构建并推送（${{ matrix.suffix }}）
         uses: docker/build-push-action@v6
         with:
           context: ./panel
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel:sha-${{ steps.sha.outputs.sha }}-${{ matrix.suffix }}
+          tags: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel:arch-${{ matrix.suffix }}
+          # 禁用 provenance/attestation，避免产生无标签的元数据 version 刷屏
+          provenance: false
           # GitHub Actions 缓存按架构隔离（用 suffix 区分 scope，避免跨架构缓存污染）
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
@@ -117,15 +118,15 @@ jobs:
         env:
           BASE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel
           TAGS: ${{ steps.meta.outputs.tags }}
-          SHA: ${{ needs.build.outputs.sha }}
         run: |
           set -euo pipefail
           # imagetools create 直接在 registry 端操作 manifest，无需（也无法）跨架构 docker pull。
-          # needs.build 已保证两架构镜像就绪，此处引用其 sha 单架构标签组装。
+          # needs.build 已保证两架构镜像就绪，引用稳定的 arch-* 标签组装对外多架构标签。
+          # ⚠️ arch-amd64/arch-arm64 是 :latest 等多架构标签的子镜像依赖，清理时严禁删除。
           for tag in $TAGS; do
             docker buildx imagetools create -t "$tag" \
-              "${BASE}:sha-${SHA}-amd64" \
-              "${BASE}:sha-${SHA}-arm64"
+              "${BASE}:arch-amd64" \
+              "${BASE}:arch-arm64"
           done
           echo "✅ 多架构镜像已合并并推送："
           docker buildx imagetools inspect "${BASE}:latest"
