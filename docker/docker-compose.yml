@@ -1,0 +1,71 @@
+# ============================================================
+# mc-router + Web 管理面板 部署编排
+# ------------------------------------------------------------
+# 公网仅暴露两个端口：
+#   - ROUTER_PORT (默认 25565)：Minecraft 游戏入口
+#   - PANEL_PORT  (默认 8080)：Web 管理面板
+# mc-router 的 REST/metrics API (25566) 仅在内部网络可见，不对外。
+#
+# 启动：docker compose -f docker/docker-compose.yml up -d
+# （镜像均从仓库拉取，无需本地构建；panel 用 GHCR 预构建镜像，router 用官方镜像）
+# 项目名：docker compose ps / 网络名前缀均以此为名（否则默认取目录名 "docker"）
+# ============================================================
+name: mc-router
+
+services:
+  mc-router:
+    # 直接使用 itzg 官方多架构镜像（amd64/arm64），零定制
+    image: itzg/mc-router:latest
+    container_name: mc-router
+    # 公网游戏入口
+    ports:
+      - "${ROUTER_PORT:-25565}:25565"
+    networks:
+      - internal
+    env_file:
+      - .env
+    environment:
+      # 路由配置文件（REST API 变更会自动持久化回此文件 = 唯一事实源）
+      ROUTES_CONFIG: /data/routes-config.json
+      # 监听配置文件变化，作为兜底重载机制
+      ROUTES_CONFIG_WATCH: "true"
+      # 启用 Prometheus /metrics 端点
+      METRICS_BACKEND: prometheus
+      # 记录玩家登录（启用玩家级指标）
+      RECORD_LOGINS: "true"
+      # REST + metrics API，仅绑定容器内（不 ports 映射 → 公网不可达）
+      API_BINDING: 0.0.0.0:25566
+      # PROXY protocol 全局透传开关（见 .env 说明）
+      USE_PROXY_PROTOCOL: "${USE_PROXY_PROTOCOL:-false}"
+    volumes:
+      - ../data:/data
+    # mc-router 启动时需要 routes-config.json 已存在（否则 fatal 退出）。
+    # 该种子文件由 panel 首启时拷贝，故 mc-router 必须等 panel healthy 后再起。
+    depends_on:
+      panel:
+        condition: service_healthy
+    restart: unless-stopped
+
+  panel:
+    # 使用 GHCR 上的预构建镜像（由 .github/workflows/docker-publish.yml 自动发布）
+    image: ghcr.io/lei-fly/mc-router-panel:latest
+    container_name: panel
+    # 公网 Web 入口
+    ports:
+      - "${PANEL_PORT:-8080}:8080"
+    networks:
+      - internal
+    env_file:
+      - .env
+    environment:
+      # 经 Docker 服务名 DNS 访问 mc-router 内部 API（bridge 网络）
+      ROUTER_API: http://mc-router:25566
+      # 数据卷（读写 .panel_secret 与种子配置拷贝）
+      PANEL_DATA_DIR: /data
+    volumes:
+      - ../data:/data
+    restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge

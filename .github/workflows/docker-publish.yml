@@ -1,0 +1,131 @@
+# ============================================================
+# 自动构建并发布 mc-router-panel 镜像到 GitHub Container Registry
+# ------------------------------------------------------------
+# 触发：
+#   - push 到 main / master        → 打 latest
+#   - push v* 版本 tag             → 打版本号标签 (v1.2.3 / 1.2.3 / 1.2 / 1)
+#   - workflow_dispatch            → 手动触发
+# 产物：ghcr.io/<owner>/mc-router-panel  (amd64 + arm64 多架构)
+#
+# 构建策略：原生 runner 矩阵 + manifest 合并
+#   - amd64 跑 ubuntu-latest（x86_64 原生）
+#   - arm64 跑 ubuntu-24.04-arm（arm64 原生，GitHub 免费 GA）
+#   各架构在原生 runner 上构建，推到「带 commit sha 的单架构镜像」(唯一、不堆积)，
+#   再由 merge job 用 imagetools 组装出对外的多架构标签(:latest/:版本号/:sha)。
+#   不走 QEMU（模拟慢且并行构建易 OOM），全程原生、稳定、快速；无重复覆盖的中间标签。
+# 鉴权：使用内置 GITHUB_TOKEN，无需额外 PAT。
+# ============================================================
+name: Build and Publish Image
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像名固定为 mc-router-panel；命名空间取仓库 owner 的小写形式（GHCR 要求全小写）
+  IMAGE_NAME: ${{ github.repository_owner }}/mc-router-panel
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    # 把本次 commit 的短 sha 暴露为输出，merge 据此引用单架构镜像
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR 镜像地址必须全小写；本步骤统一小写化，避免大小写敏感问题
+      - name: 小写化镜像名
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      # 取 7 位短 sha，作为单架构镜像的唯一标签（每次提交唯一，不会互相覆盖堆积）
+      - name: 取 commit 短 sha
+        id: sha
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 单架构镜像只打 sha-<sha>-<arch> 标签：唯一且可追溯，merge 据此组装多架构标签
+      - name: 构建并推送（${{ matrix.suffix }}）
+        uses: docker/build-push-action@v6
+        with:
+          context: ./panel
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel:sha-${{ steps.sha.outputs.sha }}-${{ matrix.suffix }}
+          # GitHub Actions 缓存按架构隔离（用 suffix 区分 scope，避免跨架构缓存污染）
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+
+  # 引用两个单架构镜像 → 组装对外的多架构标签(:latest / 版本号 / sha)
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 小写化镜像名
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 最终对外标签：默认分支 latest / semver 版本号 / commit sha
+      - name: 提取最终标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+
+      - name: 组装多架构 manifest
+        env:
+          BASE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}/mc-router-panel
+          TAGS: ${{ steps.meta.outputs.tags }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # imagetools create 直接在 registry 端操作 manifest，无需（也无法）跨架构 docker pull。
+          # needs.build 已保证两架构镜像就绪，此处引用其 sha 单架构标签组装。
+          for tag in $TAGS; do
+            docker buildx imagetools create -t "$tag" \
+              "${BASE}:sha-${SHA}-amd64" \
+              "${BASE}:sha-${SHA}-arm64"
+          done
+          echo "✅ 多架构镜像已合并并推送："
+          docker buildx imagetools inspect "${BASE}:latest"

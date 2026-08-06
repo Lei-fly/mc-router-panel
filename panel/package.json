@@ -1,0 +1,25 @@
+{
+  "name": "mc-router-panel",
+  "version": "1.0.0",
+  "description": "Web 管理面板：管理 mc-router 转发配置 + 实时监控",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "recharts": "^2.12.7",
+    "vite": "^5.4.0"
+  }
+}

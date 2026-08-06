@@ -1,0 +1,33 @@
+# Docker 构建上下文排除项（适用于 router/ 与 panel/ 各自的构建）
+# 防止把无关/大文件打进镜像层
+
+# Git / 文档
+.git/
+.gitignore
+*.md
+LICENSE
+docs/
+
+# 运行时数据卷（绝不打进镜像）
+data/
+
+# 机密
+.env
+.env.*
+**/.env
+**/.panel_secret
+
+# Node（构建期会重新 npm ci，不拷本地 node_modules/dist）
+**/node_modules/
+**/dist/
+**/.npm/
+
+# 测试与临时
+**/test/
+*.tmp
+*.bak
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

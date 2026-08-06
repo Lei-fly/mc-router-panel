@@ -1,0 +1,36 @@
+# ===== 机密与环境配置（切勿提交）=====
+.env
+.env.*
+!.env.example
+docker/.env
+**/.env
+
+# panel secret 与运行时密钥
+data/.panel_secret
+data/forwarding.secret
+**/.panel_secret
+
+# ===== 运行时数据卷（整个目录都不提交，含真实路由配置与密钥）=====
+data/
+
+# ===== ZCode 工具内部目录（历史计划/会话存档，非项目文件）=====
+.zcode/
+
+# ===== Node.js / panel =====
+**/node_modules/
+**/dist/
+**/.npm/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ===== 测试与临时产物 =====
+*.tmp
+*.bak
+coverage/
+.nyc_output/
